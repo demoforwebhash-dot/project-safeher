@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#eef3f9"/>
+    </linearGradient>
+    <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1f6f8b"/>
+      <stop offset="100%" stop-color="#11465d"/>
+    </linearGradient>
+    <linearGradient id="button" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ff8a3d"/>
+      <stop offset="100%" stop-color="#d85f10"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#163042" flood-opacity="0.18"/>
+    </filter>
+    <style>
+      .title { font: 700 30px/1.2 Arial, sans-serif; fill: #14324a; }
+      .label { font: 600 18px/1.2 Arial, sans-serif; fill: #163042; }
+      .small { font: 14px/1.2 Arial, sans-serif; fill: #3d556b; }
+      .tiny { font: 12px/1.2 Arial, sans-serif; fill: #5f7488; }
+      .boardText { font: 700 18px/1.2 Arial, sans-serif; fill: #eef7fb; letter-spacing: 0.3px; }
+      .pinText { font: 700 16px/1.2 Arial, sans-serif; fill: #f8fcff; }
+      .note { font: 600 16px/1.2 Arial, sans-serif; fill: #2b4b63; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="720" fill="url(#bg)"/>
+
+  <text x="600" y="56" text-anchor="middle" class="title">ESP8266 SOS Button Wiring</text>
+  <text x="600" y="88" text-anchor="middle" class="small">USB-B powers the board. D7 and GND go to the button. Pressing the button pulls D7 LOW.</text>
+
+  <!-- Computer -->
+  <g transform="translate(76,180)" filter="url(#shadow)">
+    <rect x="0" y="40" rx="18" ry="18" width="210" height="140" fill="#dbe7f3" stroke="#7f9db6" stroke-width="3"/>
+    <rect x="26" y="62" rx="10" ry="10" width="158" height="88" fill="#f7fbff" stroke="#a6bbcc" stroke-width="2"/>
+    <rect x="74" y="186" width="62" height="10" rx="5" fill="#7f9db6"/>
+    <text x="105" y="126" text-anchor="middle" class="label">Computer</text>
+    <text x="105" y="150" text-anchor="middle" class="tiny">USB-B cable</text>
+  </g>
+
+  <!-- USB cable -->
+  <path d="M286 354 C 355 354, 392 354, 452 354" fill="none" stroke="#0f7c8c" stroke-width="14" stroke-linecap="round"/>
+  <path d="M286 354 C 355 354, 392 354, 452 354" fill="none" stroke="#9de8ee" stroke-width="4" stroke-linecap="round" opacity="0.8"/>
+  <text x="360" y="330" text-anchor="middle" class="small">USB-B cable</text>
+
+  <!-- Board -->
+  <g transform="translate(450,160)" filter="url(#shadow)">
+    <rect x="0" y="0" rx="28" ry="28" width="410" height="360" fill="url(#board)" stroke="#0d3344" stroke-width="4"/>
+    <rect x="18" y="18" rx="20" ry="20" width="374" height="324" fill="none" stroke="#60b8d4" stroke-opacity="0.35" stroke-width="2"/>
+
+    <text x="205" y="44" text-anchor="middle" class="boardText">ESP8266 Dev Board</text>
+
+    <!-- USB-B port -->
+    <rect x="0" y="132" width="54" height="96" rx="8" fill="#ecf3f8" stroke="#c4d1dc" stroke-width="3"/>
+    <rect x="8" y="145" width="38" height="70" rx="6" fill="#cbd6df"/>
+    <text x="27" y="245" text-anchor="middle" class="tiny" fill="#e8f2f7">USB-B</text>
+
+    <!-- Header pins -->
+    <g transform="translate(360,78)">
+      <rect x="0" y="0" width="28" height="220" rx="12" fill="#0c2a38" opacity="0.55"/>
+
+      <circle cx="14" cy="56" r="12" fill="#ffd166" stroke="#fff3c8" stroke-width="2"/>
+      <circle cx="14" cy="124" r="12" fill="#d9e8f2" stroke="#ffffff" stroke-width="2"/>
+
+      <text x="-20" y="60" text-anchor="end" class="pinText">D7</text>
+      <text x="-20" y="128" text-anchor="end" class="pinText">GND</text>
+    </g>
+
+    <!-- Internal label -->
+    <text x="122" y="180" class="note" fill="#eaf6fb">Board powered by USB-B</text>
+    <text x="122" y="206" class="tiny" fill="#d4e9f3">Set the button input to INPUT_PULLUP</text>
+  </g>
+
+  <!-- Wires from pins to button -->
+  <path d="M824 296 C 900 296, 930 296, 980 296" fill="none" stroke="#ffd166" stroke-width="8" stroke-linecap="round"/>
+  <path d="M824 364 C 900 364, 930 364, 980 364" fill="none" stroke="#d9e8f2" stroke-width="8" stroke-linecap="round"/>
+
+  <!-- Button -->
+  <g transform="translate(980,258)" filter="url(#shadow)">
+    <rect x="0" y="0" width="150" height="150" rx="26" fill="url(#button)" stroke="#b84f09" stroke-width="4"/>
+    <rect x="23" y="23" width="104" height="104" rx="22" fill="#fff2e8" opacity="0.4"/>
+    <circle cx="75" cy="75" r="34" fill="#ffffff" opacity="0.85"/>
+    <text x="75" y="70" text-anchor="middle" class="label" fill="#7b3500">PUSH</text>
+    <text x="75" y="92" text-anchor="middle" class="label" fill="#7b3500">BUTTON</text>
+  </g>
+
+  <!-- Connection label -->
+  <text x="980" y="440" class="label">Wire the button like this:</text>
+  <text x="980" y="468" class="small">D7 -> one side</text>
+  <text x="980" y="492" class="small">GND -> the other side</text>
+  <text x="980" y="522" class="note">Pressing the button sends SOS</text>
+
+  <!-- Arrow note -->
+  <path d="M910 586 C 820 586, 730 586, 650 586" fill="none" stroke="#4e6d84" stroke-width="4" stroke-dasharray="10 10" stroke-linecap="round"/>
+  <text x="780" y="615" text-anchor="middle" class="small">Button press = D7 pulled to ground</text>
+</svg>
