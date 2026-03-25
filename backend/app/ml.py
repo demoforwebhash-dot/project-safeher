@@ -53,6 +53,32 @@ DEFAULT_TRAINING_EXAMPLES: tuple[tuple[str, str], ...] = (
     ("trapped", "high"),
 )
 
+_SIGNAL_ALIASES = {
+    "location_present": "location_available",
+    "location_available": "location_available",
+    "location_unavailable": "location_unavailable",
+    "location_missing": "location_unavailable",
+    "night_time": "night_time",
+    "nighttime": "night_time",
+    "night-time": "night_time",
+    "network_offline": "network_offline",
+    "offline": "network_offline",
+    "battery_critical": "battery_critical",
+    "battery_low": "battery_critical",
+    "moving_fast": "moving_fast",
+    "moving": "moving_fast",
+    "fast": "moving_fast",
+}
+
+_SIGNAL_LABELS = {
+    "location_available": "Location available",
+    "location_unavailable": "Location unavailable",
+    "night_time": "Night-time",
+    "network_offline": "Network offline",
+    "battery_critical": "Battery critical",
+    "moving_fast": "Moving fast",
+}
+
 
 def _tokenize(text: str) -> list[str]:
     return TOKEN_RE.findall(text.casefold())
@@ -87,6 +113,26 @@ def _context_str(context: dict[str, Any], key: str) -> str | None:
     return None
 
 
+def _context_str_list(context: dict[str, Any], key: str) -> list[str]:
+    value = context.get(key)
+    if not isinstance(value, list):
+        return []
+
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            normalized = item.strip()
+            if normalized:
+                result.append(normalized)
+
+    return result
+
+
+def _normalize_signal(signal: str) -> str | None:
+    normalized = signal.strip().casefold().replace(" ", "_").replace("-", "_")
+    return _SIGNAL_ALIASES.get(normalized)
+
+
 def _softmax(log_values: dict[str, float]) -> dict[str, float]:
     if not log_values:
         return {label: 0.0 for label in LABELS}
@@ -95,6 +141,16 @@ def _softmax(log_values: dict[str, float]) -> dict[str, float]:
     exp_values = {label: math.exp(value - max_value) for label, value in log_values.items()}
     total = sum(exp_values.values()) or 1.0
     return {label: value / total for label, value in exp_values.items()}
+
+
+def _score_distribution(score: float) -> dict[str, float]:
+    logits = {
+        "low": 1.4 - 4.0 * score,
+        "medium": 0.5 - abs(score - 0.5) * 3.0,
+        "high": -1.2 + 4.0 * score,
+    }
+    probabilities = _softmax(logits)
+    return {label: round(probabilities.get(label, 0.0), 4) for label in LABELS}
 
 
 @dataclass
@@ -128,6 +184,7 @@ class SafetyRiskModel:
         for text, label in examples:
             if label not in LABELS:
                 continue
+
             class_counts[label] += 1
             tokens = _tokenize(text)
             vocabulary.update(tokens)
@@ -168,113 +225,135 @@ class SafetyRiskModel:
         probabilities = _softmax(log_values)
         return {label: round(probabilities.get(label, 0.0), 4) for label in LABELS}
 
-    def analyze(
+    def _text_score(self, text: str) -> float:
+        probabilities = self._predict_probabilities(text)
+        return sum(probabilities[label] * LABEL_SCORES[label] for label in LABELS)
+
+    def _live_signal_context(
         self,
-        text: str,
-        location_present: bool = False,
-        context: dict[str, Any] | None = None,
-    ) -> SafetyScoreResponse:
-        normalized_text = " ".join(text.split())
-        context = context or {}
-        probabilities = self._predict_probabilities(normalized_text)
-        base_score = sum(probabilities[label] * LABEL_SCORES[label] for label in LABELS)
+        *,
+        location_present: bool,
+        context: dict[str, Any],
+        requested_signals: set[str],
+    ) -> tuple[list[str], float]:
         factors: list[str] = []
-        tokens = _tokenize(normalized_text)
-        context_adjustment = 0.0
-
-        high_matches = sorted(set(tokens) & self._high_tokens)
-        medium_matches = sorted(set(tokens) & self._medium_tokens)
-
-        if high_matches:
-            factors.append(
-                f"High-risk language matched: {', '.join(high_matches[:4])}."
-            )
-        elif medium_matches:
-            factors.append(
-                f"Potential concern language matched: {', '.join(medium_matches[:4])}."
-            )
-        elif normalized_text:
-            factors.append("No strong risk keywords were found.")
-        else:
-            factors.append("No message content was provided.")
+        live_score = 0.12
 
         location_status = (_context_str(context, "location_status") or "").casefold()
-        if location_present or location_status in {"watching", "available", "live"}:
-            context_adjustment += 0.03
-            factors.append("A live location is available for support.")
-        elif location_status in {"denied", "unavailable", "unsupported"}:
-            context_adjustment += 0.14
-            factors.append("Location signal is unavailable.")
+        location_available = (
+            location_present
+            or location_status in {"available", "live", "watching", "location_available"}
+            or "location_available" in requested_signals
+        )
+        location_unavailable = (
+            location_status in {"unavailable", "denied", "unsupported", "location_unavailable"}
+            or "location_unavailable" in requested_signals
+        )
+
+        if location_available:
+            live_score -= 0.08
+            factors.append(_SIGNAL_LABELS["location_available"])
+        elif location_unavailable:
+            live_score += 0.14
+            factors.append(_SIGNAL_LABELS["location_unavailable"])
 
         gps_accuracy_m = _context_float(context, "gps_accuracy_m")
-        if gps_accuracy_m is not None:
+        if gps_accuracy_m is not None and gps_accuracy_m > 50:
             if gps_accuracy_m > 150:
-                context_adjustment += 0.08
-                factors.append(f"GPS accuracy is poor at {gps_accuracy_m:.0f}m.")
-            elif gps_accuracy_m > 50:
-                context_adjustment += 0.04
-                factors.append(f"GPS accuracy is moderate at {gps_accuracy_m:.0f}m.")
+                live_score += 0.06
             else:
-                factors.append(f"GPS accuracy is strong at {gps_accuracy_m:.0f}m.")
+                live_score += 0.03
+            factors.append("GPS accuracy weak")
 
         speed_kmh = _context_float(context, "speed_kmh")
-        if speed_kmh is not None:
-            if speed_kmh >= 70:
-                context_adjustment += 0.22
-                factors.append(f"Rapid movement detected at {speed_kmh:.0f} km/h.")
-            elif speed_kmh >= 25:
-                context_adjustment += 0.12
-                factors.append(f"Fast movement detected at {speed_kmh:.0f} km/h.")
-            elif speed_kmh >= 5:
-                context_adjustment += 0.06
-                factors.append(f"Movement detected at {speed_kmh:.0f} km/h.")
-            else:
-                factors.append("User appears stationary.")
-
         movement_state = _context_str(context, "movement_state")
-        if movement_state in {"fast", "moving"}:
-            context_adjustment += 0.05
-            factors.append(f"Movement state reports {movement_state}.")
+        moving_fast = (
+            "moving_fast" in requested_signals
+            or movement_state in {"fast", "moving"}
+            or (speed_kmh is not None and speed_kmh >= 25)
+        )
+        if moving_fast:
+            if speed_kmh is not None and speed_kmh >= 70:
+                live_score += 0.18
+            else:
+                live_score += 0.15
+            factors.append(_SIGNAL_LABELS["moving_fast"])
 
         battery_level = _context_float(context, "battery_level")
         battery_charging = _context_bool(context, "battery_charging")
         if battery_level is not None:
             battery_percent = battery_level * 100 if battery_level <= 1 else battery_level
-            if battery_percent <= 10 and not battery_charging:
-                context_adjustment += 0.08
-                factors.append(f"Battery is critically low at {battery_percent:.0f}%.")
-            elif battery_percent <= 20 and not battery_charging:
-                context_adjustment += 0.04
-                factors.append(f"Battery is getting low at {battery_percent:.0f}%.")
-            else:
-                factors.append(f"Battery level is {battery_percent:.0f}%.")
+            if battery_percent <= 15 and battery_charging is not True:
+                live_score += 0.15
+                factors.append(_SIGNAL_LABELS["battery_critical"])
+            elif battery_percent <= 25 and battery_charging is not True:
+                live_score += 0.05
+                factors.append("Battery low")
 
         network_online = _context_bool(context, "network_online")
-        if network_online is False:
-            context_adjustment += 0.04
-            factors.append("Network connectivity is offline.")
+        if network_online is False or "network_offline" in requested_signals:
+            live_score += 0.15
+            factors.append(_SIGNAL_LABELS["network_offline"])
 
         is_night = _context_bool(context, "is_night")
-        if is_night is True:
-            context_adjustment += 0.06
-            factors.append("Night-time conditions are active.")
+        if is_night is True or "night_time" in requested_signals:
+            live_score += 0.1
+            factors.append(_SIGNAL_LABELS["night_time"])
 
-        threat_score = _clamp(base_score + context_adjustment)
-        if threat_score >= 0.7:
+        return list(dict.fromkeys(factors)), _clamp(live_score)
+
+    def analyze(
+        self,
+        text: str,
+        location_present: bool = False,
+        context: dict[str, Any] | None = None,
+        signals: Iterable[str] | None = None,
+    ) -> SafetyScoreResponse:
+        normalized_text = " ".join(text.split())
+        context = context or {}
+        requested_signals = {
+            normalized
+            for raw_signal in (
+                signals if signals is not None else _context_str_list(context, "signals")
+            )
+            if (normalized := _normalize_signal(raw_signal)) is not None
+        }
+
+        live_factors, live_score = self._live_signal_context(
+            location_present=location_present,
+            context=context,
+            requested_signals=requested_signals,
+        )
+        text_score = self._text_score(normalized_text) if normalized_text else 0.12
+
+        tokens = _tokenize(normalized_text)
+        high_matches = sorted(set(tokens) & self._high_tokens)
+        medium_matches = sorted(set(tokens) & self._medium_tokens)
+
+        factors = list(live_factors)
+        if high_matches:
+            factors.append("High-risk language")
+        elif medium_matches:
+            factors.append("Concerning language")
+        elif normalized_text:
+            factors.append("No strong risk keywords found")
+
+        if not factors:
+            factors.append("Stable conditions")
+
+        threat_score = _clamp(max(text_score, live_score))
+        if threat_score >= 0.65:
             threat_level = "high"
-        elif threat_score >= 0.4:
+        elif threat_score >= 0.35:
             threat_level = "medium"
         else:
             threat_level = "low"
-
-        if threat_level == "high" and not high_matches and context_adjustment > 0:
-            factors.append("The trained model still classified the message as high risk.")
 
         return SafetyScoreResponse(
             text=normalized_text,
             threat_score=round(threat_score, 2),
             threat_level=threat_level,  # type: ignore[arg-type]
-            probabilities=probabilities,
+            probabilities=_score_distribution(threat_score),
             factors=factors,
             recommended_actions=list(LABEL_RECOMMENDED_ACTIONS[threat_level]),
         )

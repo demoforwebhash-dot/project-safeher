@@ -1,10 +1,13 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
+import logging
 import math
 import os
-import logging
+import threading
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from .ai import GroqReplyGenerator
 from .db import PostgresStore
@@ -125,6 +128,47 @@ DEFAULT_CONTACT_SEEDS: tuple[ContactSeed, ...] = (
 )
 
 log = logging.getLogger(__name__)
+
+
+class Esp8266AlertStreamHub:
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._subscribers: dict[str, set[asyncio.Queue[Esp8266StatusResponse]]] = defaultdict(set)
+        self._lock = threading.RLock()
+
+    def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            self._loop = loop
+
+    def subscribe(self, user_id: str) -> asyncio.Queue[Esp8266StatusResponse]:
+        queue: asyncio.Queue[Esp8266StatusResponse] = asyncio.Queue()
+        with self._lock:
+            self._subscribers[user_id].add(queue)
+        return queue
+
+    def unsubscribe(self, user_id: str, queue: asyncio.Queue[Esp8266StatusResponse]) -> None:
+        with self._lock:
+            subscribers = self._subscribers.get(user_id)
+            if not subscribers:
+                return
+
+            subscribers.discard(queue)
+            if not subscribers:
+                self._subscribers.pop(user_id, None)
+
+    def publish(self, user_id: str, status: Esp8266StatusResponse) -> None:
+        with self._lock:
+            loop = self._loop
+            subscribers = tuple(self._subscribers.get(user_id, ()))
+
+        if loop is None or not subscribers:
+            return
+
+        for queue in subscribers:
+            try:
+                loop.call_soon_threadsafe(queue.put_nowait, status)
+            except RuntimeError:
+                continue
 
 
 class SafetyAgent:
@@ -363,6 +407,10 @@ class SafeHerBackend:
         self.model = model or SafetyRiskModel()
         self.agent = SafetyAgent()
         self.esp8266 = Esp8266Gateway(self.store)
+        self._esp8266_alert_streams = Esp8266AlertStreamHub()
+
+    def attach_esp8266_stream_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._esp8266_alert_streams.attach_loop(loop)
 
     def ensure_user(self, user_id: str) -> StoredUserProfile:
         return self.store.ensure_user(user_id)
@@ -446,11 +494,13 @@ class SafeHerBackend:
         text: str,
         location_present: bool = False,
         context: dict[str, Any] | None = None,
+        signals: Iterable[str] | None = None,
     ) -> SafetyScoreResponse:
         return self.model.analyze(
             text,
             location_present=location_present,
             context=context,
+            signals=signals,
         )
 
     def build_chat_response(
@@ -527,6 +577,12 @@ class SafeHerBackend:
 
     def record_device_alert(self, payload: DeviceAlertRequest) -> DeviceAlertResponse:
         self.ensure_user(payload.user_id)
+        log.info(
+            "Processing device alert user_id=%s device_id=%s kind=%s",
+            payload.user_id,
+            payload.device_id,
+            payload.kind,
+        )
         signal_text = " ".join(
             part for part in (payload.kind or "panic", payload.message or "") if part
         )
@@ -569,6 +625,29 @@ class SafeHerBackend:
             message=payload.message or payload.kind or "alert",
         )
 
+        if payload.device_id:
+            device_status = self.store.record_esp8266_alert(
+                user_id=payload.user_id,
+                device_id=payload.device_id,
+                metadata={
+                    "kind": payload.kind,
+                    "message": payload.message,
+                    "alert_kind": payload.kind,
+                    "alert_message": payload.message,
+                    "alert_threat_score": analysis.threat_score,
+                    "alert_threat_level": analysis.threat_level,
+                    "alert_factors": analysis.factors,
+                },
+            ).model_copy(update={"event_id": event_id, "event_type": "alert"})
+            self.publish_esp8266_alert(payload.user_id, device_status)
+
+        log.info(
+            "Recorded device alert event_id=%s threat_level=%s source=%s",
+            event_id,
+            analysis.threat_level,
+            payload.kind or "panic",
+        )
+
         return DeviceAlertResponse(
             status="ok",
             threat_score=analysis.threat_score,
@@ -586,3 +665,17 @@ class SafeHerBackend:
 
     def get_esp8266_status(self, user_id: str, device_id: str | None) -> Esp8266StatusResponse:
         return self.esp8266.get_status(user_id=user_id, device_id=device_id)
+
+    def subscribe_esp8266_alerts(self, user_id: str) -> asyncio.Queue[Esp8266StatusResponse]:
+        return self._esp8266_alert_streams.subscribe(user_id)
+
+    def unsubscribe_esp8266_alerts(
+        self,
+        user_id: str,
+        queue: asyncio.Queue[Esp8266StatusResponse],
+    ) -> None:
+        self._esp8266_alert_streams.unsubscribe(user_id, queue)
+
+    def publish_esp8266_alert(self, user_id: str, status: Esp8266StatusResponse) -> None:
+        self._esp8266_alert_streams.publish(user_id, status)
+

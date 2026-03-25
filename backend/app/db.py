@@ -694,6 +694,21 @@ class PostgresStore:
             last_heartbeat_at=self._now_iso(),
         )
 
+    def record_esp8266_alert(
+        self,
+        *,
+        user_id: str,
+        device_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> Esp8266StatusResponse:
+        return self._upsert_esp8266_device(
+            user_id=user_id,
+            device_id=device_id,
+            metadata=metadata,
+            connected=True,
+            last_alert_at=self._now_iso(),
+        )
+
     def get_esp8266_status(self, user_id: str, device_id: str | None) -> Esp8266StatusResponse:
         if not device_id:
             row = self._fetchone(

@@ -116,7 +116,8 @@ class ChatResponse(BaseModel):
 
 class SafetyScoreRequest(BaseModel):
     user_id: str | None = None
-    text: str
+    text: str = ""
+    signals: list[str] = Field(default_factory=list)
     location_present: bool = False
     context: dict[str, Any] = Field(default_factory=dict)
 

@@ -28,7 +28,9 @@ const bool STATUS_LED_ON = LOW;   // built-in LED is active-low on ESP8266 NodeM
 const bool STATUS_LED_OFF = HIGH;
 bool statusLedOn = false;
 unsigned long statusLedOffAt = 0;
-const unsigned long statusLedPulseMs = 1000;
+const unsigned long statusLedPulseMs = 1500;
+unsigned long lastWiFiRetryMs = 0;
+const unsigned long wifiRetryMs = 10000;
 
 void setStatusLed(bool on) {
   digitalWrite(STATUS_LED_PIN, on ? STATUS_LED_ON : STATUS_LED_OFF);
@@ -42,21 +44,55 @@ void updateStatusLed() {
   }
 }
 
-void connectWiFi() {
+bool connectWiFi(unsigned long timeoutMs = 15000) {
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("WiFi");
-  while (WiFi.status() != WL_CONNECTED) {
+  Serial.printf("Connecting to WiFi SSID \"%s\"", WIFI_SSID);
+
+  unsigned long startMs = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - startMs) < timeoutMs) {
     delay(300);
     Serial.print(".");
   }
+
   Serial.println();
-  Serial.print("Connected. IP: ");
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection failed.");
+    return false;
+  }
+
+  Serial.println("WiFi connected.");
+  Serial.print("SSID: ");
+  Serial.println(WiFi.SSID());
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
+  Serial.print("Gateway: ");
+  Serial.println(WiFi.gatewayIP());
+  Serial.print("RSSI: ");
+  Serial.print(WiFi.RSSI());
+  Serial.println(" dBm");
+  return true;
+}
+
+void retryWiFiIfNeeded() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  if ((millis() - lastWiFiRetryMs) < wifiRetryMs) {
+    return;
+  }
+
+  lastWiFiRetryMs = millis();
+  Serial.println("WiFi disconnected. Retrying connection...");
+  connectWiFi(5000);
 }
 
 void sendAlert() {
-  if (WiFi.status() != WL_CONNECTED) {
+  if (WiFi.status() != WL_CONNECTED && !connectWiFi(5000)) {
     Serial.println("WiFi not connected.");
     return;
   }
@@ -69,6 +105,7 @@ void sendAlert() {
     return;
   }
 
+  Serial.println("Posting SOS to backend...");
   http.addHeader("Content-Type", "application/json");
 
   String payload = String("{\"user_id\":\"") + USER_ID +
@@ -78,6 +115,14 @@ void sendAlert() {
   int code = http.POST(payload);
   Serial.printf("Alert POST code: %d\n", code);
   Serial.println(http.getString());
+
+  if (code >= 200 && code < 300) {
+    Serial.println("SOS acknowledged by backend.");
+    statusLedOffAt = millis() + statusLedPulseMs;
+  } else {
+    Serial.println("SOS delivery failed or returned an error.");
+    statusLedOffAt = millis() + 500;
+  }
 
   http.end();
 }
@@ -91,9 +136,12 @@ void setup() {
 }
 
 void loop() {
+  retryWiFiIfNeeded();
+
   bool reading = digitalRead(BUTTON_PIN);
 
   if (reading != lastReading) {
+    Serial.printf("Button raw state: %s\n", reading == LOW ? "LOW" : "HIGH");
     lastDebounceMs = millis();
   }
 
@@ -101,6 +149,7 @@ void loop() {
     stableButtonState = reading;
 
     if (stableButtonState == LOW) {
+      Serial.println("SOS button detected.");
       setStatusLed(true);
       sendAlert();
     }

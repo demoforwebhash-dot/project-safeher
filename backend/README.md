@@ -6,10 +6,12 @@
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 API base: `http://localhost:8000`
+
+If the ESP8266 needs to reach this backend over Wi-Fi, use your computer's LAN IP in the firmware URL, not `127.0.0.1`.
 
 This backend now uses Neon/Postgres for persistence. Set `NEON_DATABASE_URL` in `backend/.env` with your Neon connection string. The app will also accept `DATABASE_URL` as a fallback.
 If you want the chat and agent replies to come from LangChain + Groq, also set `GROQ_API_KEY`. The backend uses LangChain's `ChatGroq` integration and falls back to the local safety reply generator when the key is missing.

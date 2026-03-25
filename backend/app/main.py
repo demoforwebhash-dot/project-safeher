@@ -1,8 +1,13 @@
 from contextlib import asynccontextmanager
+import asyncio
 from datetime import datetime, timezone
+import json
+import logging
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from pydantic import ValidationError
 
 from .models import (
     AgentRequest,
@@ -29,8 +34,12 @@ from .models import (
 from .state import backend_state
 
 
+log = logging.getLogger(__name__)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    backend_state.attach_esp8266_stream_loop(asyncio.get_running_loop())
     yield
 
 
@@ -45,6 +54,11 @@ app.add_middleware(
 )
 
 router = APIRouter(prefix="/v1")
+
+
+def _format_sse(event: str, data: dict[str, object]) -> str:
+    payload = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
 
 
 @app.get("/")
@@ -141,14 +155,101 @@ def chat(payload: ChatRequest) -> ChatResponse:
 
 @router.post("/ml/safety-score", response_model=SafetyScoreResponse)
 def safety_score(payload: SafetyScoreRequest) -> SafetyScoreResponse:
-    if not payload.text.strip():
-        raise HTTPException(status_code=400, detail="Text is required for scoring.")
+    has_live_context = payload.location_present or bool(payload.signals) or bool(payload.context)
+    if not payload.text.strip() and not has_live_context:
+        raise HTTPException(
+            status_code=400,
+            detail="Text or live signals are required for scoring.",
+        )
 
     return backend_state.score_text(
         payload.text,
         location_present=payload.location_present,
         context=payload.context,
+        signals=payload.signals,
     )
+
+
+@router.websocket("/ml/safety-score/ws")
+async def safety_score_ws(websocket: WebSocket) -> None:
+    await websocket.accept()
+
+    try:
+        while True:
+            raw_message = await websocket.receive_text()
+
+            try:
+                message = json.loads(raw_message)
+            except json.JSONDecodeError:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "Live prediction payload must be valid JSON.",
+                    }
+                )
+                continue
+
+            if not isinstance(message, dict):
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "Live prediction payload must be an object.",
+                    }
+                )
+                continue
+
+            request_id = message.get("request_id")
+            if not isinstance(request_id, int):
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "message": "Live prediction payload requires an integer request_id.",
+                    }
+                )
+                continue
+
+            try:
+                payload = SafetyScoreRequest.model_validate(message)
+            except ValidationError as error:
+                detail = error.errors()[0].get("msg", "Invalid live prediction payload.")
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "message": detail,
+                    }
+                )
+                continue
+
+            has_live_context = (
+                payload.location_present or bool(payload.signals) or bool(payload.context)
+            )
+            if not payload.text.strip() and not has_live_context:
+                await websocket.send_json(
+                    {
+                        "type": "error",
+                        "request_id": request_id,
+                        "message": "Text or live signals are required for scoring.",
+                    }
+                )
+                continue
+
+            analysis = backend_state.score_text(
+                payload.text,
+                location_present=payload.location_present,
+                context=payload.context,
+                signals=payload.signals,
+            )
+
+            await websocket.send_json(
+                {
+                    "type": "safety-score-result",
+                    "request_id": request_id,
+                    "analysis": analysis.model_dump(mode="json"),
+                }
+            )
+    except WebSocketDisconnect:
+        return
 
 
 @router.post("/ai/respond", response_model=AgentResponse)
@@ -170,7 +271,54 @@ def agent_respond(payload: AgentRequest) -> AgentResponse:
 @router.post("/device/alert", response_model=DeviceAlertResponse)
 @router.post("/device/esp8266/alert", response_model=DeviceAlertResponse)
 def device_alert(payload: DeviceAlertRequest) -> DeviceAlertResponse:
+    log.info(
+        "Received device alert request user_id=%s device_id=%s kind=%s",
+        payload.user_id,
+        payload.device_id,
+        payload.kind,
+    )
     return backend_state.record_device_alert(payload)
+
+
+@router.get("/device/esp8266/stream/{user_id}")
+async def esp8266_alert_stream(
+    user_id: str,
+    device_id: str | None = None,
+) -> StreamingResponse:
+    backend_state.ensure_user(user_id)
+    queue = backend_state.subscribe_esp8266_alerts(user_id)
+    initial_status = backend_state.get_esp8266_status(user_id, device_id)
+
+    async def event_generator():
+        try:
+            yield ": connected\n\n"
+            yield _format_sse("snapshot", initial_status.model_dump(mode="json"))
+
+            while True:
+                try:
+                    status = await asyncio.wait_for(queue.get(), timeout=15)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+
+                if device_id and status.device_id and status.device_id != device_id:
+                    continue
+
+                yield _format_sse("alert", status.model_dump(mode="json"))
+        except asyncio.CancelledError:
+            return
+        finally:
+            backend_state.unsubscribe_esp8266_alerts(user_id, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/device/esp8266/register", response_model=Esp8266StatusResponse)
